@@ -28,6 +28,15 @@
 #include "qrtr.h"
 
 #define QRTR_LOG_PAGE_CNT 4
+//yangmingjin@BSP.POWER.Basic 2019/05/30 add for RM_TAG_POWER_DEBUG
+#ifdef VENDOR_EDIT
+static int ipc_router_debug_mask = 0;
+
+void set_ipc_router_debug_mask(int debug_mask){
+	ipc_router_debug_mask = !!debug_mask;
+};
+#endif
+/*VENDOR_EDIT*/
 #define QRTR_INFO(ctx, x, ...)				\
 	ipc_log_string(ctx, x, ##__VA_ARGS__)
 
@@ -45,6 +54,7 @@
 #define QRTR_STATE_INIT	-1
 
 #define AID_VENDOR_QRTR	KGIDT_INIT(2906)
+
 
 /**
  * struct qrtr_hdr_v1 - (I|R)PCrouter packet header version 1
@@ -217,6 +227,7 @@ static void qrtr_log_tx_msg(struct qrtr_node *node, struct qrtr_hdr_v1 *hdr,
 	if (!hdr || !skb)
 		return;
 
+
 	if (hdr->type == QRTR_TYPE_DATA) {
 		skb_copy_bits(skb, QRTR_HDR_MAX_SIZE, &pl_buf, sizeof(pl_buf));
 		QRTR_INFO(node->ilc,
@@ -339,8 +350,7 @@ static void __qrtr_node_release(struct kref *kref)
 	if (node->nid != QRTR_EP_NID_AUTO) {
 		radix_tree_for_each_slot(slot, &qrtr_nodes, &iter, 0) {
 			if (node == *slot)
-				radix_tree_iter_delete(&qrtr_nodes, &iter,
-						       slot);
+				radix_tree_delete(&qrtr_nodes, iter.index);
 		}
 	}
 
@@ -356,7 +366,7 @@ static void __qrtr_node_release(struct kref *kref)
 			sock_put(waiter->sk);
 			kfree(waiter);
 		}
-		radix_tree_iter_delete(&node->qrtr_tx_flow, &iter, slot);
+		radix_tree_delete(&node->qrtr_tx_flow, iter.index);
 		kfree(flow);
 	}
 	mutex_unlock(&node->qrtr_tx_lock);
@@ -697,20 +707,15 @@ EXPORT_SYMBOL(qrtr_peek_pkt_size);
 static void qrtr_alloc_backup(struct work_struct *work)
 {
 	struct sk_buff *skb;
-	int errcode;
 
 	while (skb_queue_len(&qrtr_backup_lo) < QRTR_BACKUP_LO_NUM) {
-		skb = alloc_skb_with_frags(sizeof(struct qrtr_hdr_v1),
-					   QRTR_BACKUP_LO_SIZE, 0, &errcode,
-					   GFP_KERNEL);
+		skb = alloc_skb(QRTR_BACKUP_LO_SIZE, GFP_KERNEL);
 		if (!skb)
 			break;
 		skb_queue_tail(&qrtr_backup_lo, skb);
 	}
 	while (skb_queue_len(&qrtr_backup_hi) < QRTR_BACKUP_HI_NUM) {
-		skb = alloc_skb_with_frags(sizeof(struct qrtr_hdr_v1),
-					   QRTR_BACKUP_HI_SIZE, 0, &errcode,
-					   GFP_KERNEL);
+		skb = alloc_skb(QRTR_BACKUP_HI_SIZE, GFP_KERNEL);
 		if (!skb)
 			break;
 		skb_queue_tail(&qrtr_backup_hi, skb);
@@ -920,12 +925,14 @@ static bool qrtr_must_forward(struct qrtr_node *src,
 	return false;
 }
 
-static void qrtr_fwd_ctrl_pkt(struct qrtr_node *src, struct sk_buff *skb)
+static void qrtr_fwd_ctrl_pkt(struct sk_buff *skb)
 {
 	struct qrtr_node *node;
+	struct qrtr_node *src;
 	struct qrtr_cb *cb = (struct qrtr_cb *)skb->cb;
 
 	qrtr_skb_align_linearize(skb);
+	src = qrtr_node_lookup(cb->src_node);
 	down_read(&qrtr_node_lock);
 	list_for_each_entry(node, &qrtr_all_epts, item) {
 		struct sockaddr_qrtr from;
@@ -950,6 +957,7 @@ static void qrtr_fwd_ctrl_pkt(struct qrtr_node *src, struct sk_buff *skb)
 		qrtr_node_enqueue(node, skbn, cb->type, &from, &to, 0);
 	}
 	up_read(&qrtr_node_lock);
+	qrtr_node_release(src);
 }
 
 static void qrtr_fwd_pkt(struct sk_buff *skb, struct qrtr_cb *cb)
@@ -985,7 +993,7 @@ static void qrtr_node_rx_work(struct kthread_work *work)
 		qrtr_node_assign(node, cb->src_node);
 
 		if (cb->type != QRTR_TYPE_DATA)
-			qrtr_fwd_ctrl_pkt(node, skb);
+			qrtr_fwd_ctrl_pkt(skb);
 
 		if (cb->type == QRTR_TYPE_NEW_SERVER &&
 		    skb->len == sizeof(pkt)) {
@@ -1009,8 +1017,6 @@ static void qrtr_node_rx_work(struct kthread_work *work)
 				kfree_skb(skb);
 			} else {
 				if (sock_queue_rcv_skb(&ipc->sk, skb)) {
-					pr_err("%s qrtr pkt dropped flow[%d]\n",
-					       __func__, cb->confirm_rx);
 					kfree_skb(skb);
 				}
 
