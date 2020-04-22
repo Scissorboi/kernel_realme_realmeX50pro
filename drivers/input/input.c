@@ -29,6 +29,13 @@
 #include <linux/rcupdate.h>
 #include "input-compat.h"
 
+#ifdef VENDOR_EDIT
+// Bin.Xu@BSP.Kernel.Stability, 2020/1/2, Add for oppo key handle
+#ifdef CONFIG_OPPO_KEY_HANDLE
+#include <linux/oppo_key_handle.h>
+#endif
+#endif /* VENDOR_EDIT */
+
 MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
 MODULE_DESCRIPTION("Input core");
 MODULE_LICENSE("GPL");
@@ -366,10 +373,24 @@ static int input_get_disposition(struct input_dev *dev,
 	return disposition;
 }
 
+#if defined(CONFIG_OPPO_SAUPWK)
+extern void oppo_sync_saupwk_event(unsigned int , unsigned int , int);
+#endif
 static void input_handle_event(struct input_dev *dev,
 			       unsigned int type, unsigned int code, int value)
 {
 	int disposition = input_get_disposition(dev, type, code, &value);
+
+#ifdef VENDOR_EDIT
+	// Bin.Xu@BSP.Kernel.Stability, 2019/11/11, fix for tp_log
+#ifdef CONFIG_OPPO_KEY_HANDLE
+	oppo_key_event(dev, type, code, value);
+#endif
+#endif /* VENDOR_EDIT */
+
+	#if defined(CONFIG_OPPO_SAUPWK)
+	oppo_sync_saupwk_event(type, code, value);
+	#endif
 
 	if (disposition != INPUT_IGNORE_EVENT && type != EV_SYN)
 		add_input_randomness(type, code, value);
