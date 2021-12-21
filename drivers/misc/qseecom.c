@@ -3902,6 +3902,11 @@ static int __qseecom_update_cmd_buf(void *msg, bool cleanup,
 		ret = qseecom_dmabuf_map(ion_fd, &sg_ptr, &attach, &dmabuf);
 		if (ret) {
 			pr_err("IOn client could not retrieve sg table\n");
+			#ifdef VENDOR_EDIT
+			//Murphy@BSP.Kernel.stability, 2019/10/15, Add for avoid double free cause crashed
+			dmabuf = NULL;
+			attach = NULL;
+			#endif
 			goto err;
 		}
 		if (sg_ptr->nents == 0) {
