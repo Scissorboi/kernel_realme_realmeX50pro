@@ -14,6 +14,29 @@
 #include <linux/mhi.h>
 #include "mhi_internal.h"
 
+#ifdef VENDOR_EDIT
+/* Jianchao.Shi@PSW.BSP.Power.Basic, 2019/12/10, sjc Add for PCIE irq power debug */
+#ifdef CONFIG_MHI_DEBUG
+enum MHI_DEBUG_INDEX {
+	MSI_RESUME_SWITCH,
+	MSI_DATA_EVENT_INDEX,
+	MSI_CTRL_INDEX,
+	MSI_BW_INDEX,
+	MSI_DEBUG_MAX,
+};
+
+#define MHI_MSI_SHIFT	24
+#define MHI_CHAN_SHIFT	16
+#define MHI_ET_SHIFT	8
+
+#ifdef debug
+#undef debug
+#endif
+
+int g_msi_power[MSI_DEBUG_MAX][1] = {0};
+#endif
+#endif /*VENDOR_EDIT*/
+
 static char *mhi_generic_sfr = "unknown reason";
 
 static void __mhi_unprepare_channel(struct mhi_controller *mhi_cntrl,
@@ -315,10 +338,35 @@ static void mhi_recycle_ev_ring_element(struct mhi_controller *mhi_cntrl,
 
 	/* update the WP */
 	ring->wp += ring->el_size;
+	ctxt_wp = *ring->ctxt_wp + ring->el_size;
 
+	if (ring->wp >= (ring->base + ring->len)) {
+		ring->wp = ring->base;
+		ctxt_wp = ring->iommu_base;
+	}
+
+	*ring->ctxt_wp = ctxt_wp;
+
+	/* update the RP */
+	ring->rp += ring->el_size;
+	if (ring->rp >= (ring->base + ring->len))
+		ring->rp = ring->base;
+
+	/* visible to other cores */
+	smp_wmb();
+}
+
+static void mhi_recycle_fwd_ev_ring_element(struct mhi_controller *mhi_cntrl,
+					struct mhi_ring *ring)
+{
+	dma_addr_t ctxt_wp;
+
+	/* update the WP */
+	ring->wp += ring->el_size;
 	if (ring->wp >= (ring->base + ring->len))
 		ring->wp = ring->base;
 
+	/* update the context WP based on the RP to support fast forwarding */
 	ctxt_wp = ring->iommu_base + (ring->wp - ring->base);
 	*ring->ctxt_wp = ctxt_wp;
 
@@ -402,7 +450,7 @@ int mhi_queue_skb(struct mhi_device *mhi_dev,
 	int ret;
 
 	if (mhi_is_ring_full(mhi_cntrl, tre_ring))
-		return -EBUSY;
+		return -ENOMEM;
 
 	read_lock_bh(&mhi_cntrl->pm_lock);
 	if (unlikely(MHI_PM_IN_ERROR_STATE(mhi_cntrl->pm_state))) {
@@ -629,7 +677,7 @@ int mhi_queue_buf(struct mhi_device *mhi_dev,
 
 	tre_ring = &mhi_chan->tre_ring;
 	if (mhi_is_ring_full(mhi_cntrl, tre_ring))
-		return -EBUSY;
+		return -ENOMEM;
 
 	ret = mhi_chan->gen_tre(mhi_cntrl, mhi_chan, buf, buf, len, mflags);
 	if (unlikely(ret))
@@ -872,13 +920,12 @@ void mhi_create_devices(struct mhi_controller *mhi_cntrl)
 	 * devices, because client may try to capture time during
 	 * clint probe.
 	 */
-	if (mhi_cntrl->time_sync)
-		mhi_create_time_sync_dev(mhi_cntrl);
+	mhi_create_time_sync_dev(mhi_cntrl);
 
 	mhi_chan = mhi_cntrl->mhi_chan;
 	for (i = 0; i < mhi_cntrl->max_chan; i++, mhi_chan++) {
 		if (!mhi_chan->configured || mhi_chan->mhi_dev ||
-		    !(mhi_chan->ee & BIT(mhi_cntrl->ee)))
+		    !(mhi_chan->ee_mask & BIT(mhi_cntrl->ee)))
 			continue;
 		mhi_dev = mhi_alloc_device(mhi_cntrl);
 		if (!mhi_dev)
@@ -1024,8 +1071,7 @@ static int parse_xfer_event(struct mhi_controller *mhi_cntrl,
 				mhi_cntrl->unmap_single(mhi_cntrl, buf_info);
 
 			result.buf_addr = buf_info->cb_buf;
-			result.bytes_xferd = min_t(u16, xfer_len,
-					buf_info->len);
+			result.bytes_xferd = xfer_len;
 			mhi_del_ring_element(mhi_cntrl, buf_ring);
 			mhi_del_ring_element(mhi_cntrl, tre_ring);
 			local_rp = tre_ring->rp;
@@ -1130,9 +1176,7 @@ static int parse_rsc_event(struct mhi_controller *mhi_cntrl,
 
 	result.transaction_status = (ev_code == MHI_EV_CC_OVERFLOW) ?
 		-EOVERFLOW : 0;
-
-	/* truncate to buf len if xfer_len is larger */
-	result.bytes_xferd = min_t(u16, xfer_len, buf_info->len);
+	result.bytes_xferd = xfer_len;
 	result.buf_addr = buf_info->cb_buf;
 	result.dir = mhi_chan->dir;
 
@@ -1202,10 +1246,6 @@ static void mhi_process_cmd_completion(struct mhi_controller *mhi_cntrl,
 		break;
 	default:
 		chan = MHI_TRE_GET_CMD_CHID(cmd_pkt);
-		if (chan >= mhi_cntrl->max_chan) {
-			MHI_ERR("invalid channel id %u\n", chan);
-			break;
-		}
 		mhi_chan = &mhi_cntrl->mhi_chan[chan];
 		write_lock_bh(&mhi_chan->lock);
 		mhi_chan->ccs = MHI_TRE_GET_EV_CODE(tre);
@@ -1226,9 +1266,6 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 	struct mhi_event_ctxt *er_ctxt =
 		&mhi_cntrl->mhi_ctxt->er_ctxt[mhi_event->er_index];
 	int count = 0;
-	u32 chan;
-	struct mhi_chan *mhi_chan;
-	unsigned long flags;
 
 	/*
 	 * this is a quick check to avoid unnecessary event processing
@@ -1243,6 +1280,45 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 
 	dev_rp = mhi_to_virtual(ev_ring, er_ctxt->rp);
 	local_rp = ev_ring->rp;
+
+#ifdef VENDOR_EDIT
+/* Jianchao.Shi@PSW.BSP.Power.Basic, 2019/12/10, sjc Add for PCIE irq power debug */
+#ifdef CONFIG_MHI_DEBUG
+	if (g_msi_power[MSI_RESUME_SWITCH][0] == 0x88) {
+		enum MHI_PKT_TYPE type_temp = MHI_TRE_GET_EV_TYPE(local_rp);
+		switch (type_temp) {
+			case MHI_PKT_TYPE_STATE_CHANGE_EVENT:
+			{
+				enum mhi_dev_state new_state_temp = MHI_TRE_GET_EV_STATE(local_rp);
+				g_msi_power[MSI_CTRL_INDEX][0] = type_temp << 8 | new_state_temp;
+				break;
+			}
+
+			case MHI_PKT_TYPE_CMD_COMPLETION_EVENT:
+				g_msi_power[MSI_CTRL_INDEX][0] = type_temp << 8;
+				break;
+
+			case MHI_PKT_TYPE_EE_EVENT:
+			{
+				enum mhi_ee event_temp = MHI_TRE_GET_EV_EXECENV(local_rp);
+				g_msi_power[MSI_CTRL_INDEX][0] = type_temp << 8 | event_temp;
+				break;
+			}
+
+			default:
+				g_msi_power[MSI_CTRL_INDEX][0] = 0x0;
+				break;
+		}
+
+		MHI_ERR("wakeup CTRL 0x%08x\n", g_msi_power[MSI_CTRL_INDEX][0]);
+#ifdef debug
+		MHI_VERB("wakeup CTRL: 0x%08x\n", g_msi_power[MSI_CTRL_INDEX][0]);
+#endif
+
+		g_msi_power[MSI_RESUME_SWITCH][0] = 0x0;
+	}
+#endif /*CONFIG_MHI_DEBUG*/
+#endif /*VENDOR_EDIT*/
 
 	while (dev_rp != local_rp) {
 		enum MHI_PKT_TYPE type = MHI_TRE_GET_EV_TYPE(local_rp);
@@ -1338,20 +1414,12 @@ int mhi_process_ctrl_ev_ring(struct mhi_controller *mhi_cntrl,
 
 			break;
 		}
-		case MHI_PKT_TYPE_TX_EVENT:
-			chan = MHI_TRE_GET_EV_CHID(local_rp);
-			mhi_chan = &mhi_cntrl->mhi_chan[chan];
-			parse_xfer_event(mhi_cntrl, local_rp, mhi_chan);
-			event_quota--;
-			break;
 		default:
 			MHI_ERR("Unhandled Event: 0x%x\n", type);
 			break;
 		}
 
-		spin_lock_irqsave(&mhi_event->lock, flags);
 		mhi_recycle_ev_ring_element(mhi_cntrl, ev_ring);
-		spin_unlock_irqrestore(&mhi_event->lock, flags);
 		local_rp = ev_ring->rp;
 		dev_rp = mhi_to_virtual(ev_ring, er_ctxt->rp);
 		count++;
@@ -1388,6 +1456,20 @@ int mhi_process_data_event_ring(struct mhi_controller *mhi_cntrl,
 	dev_rp = mhi_to_virtual(ev_ring, er_ctxt->rp);
 	local_rp = ev_ring->rp;
 
+#ifdef VENDOR_EDIT
+/* Jianchao.Shi@PSW.BSP.Power.Basic, 2019/12/10, sjc Add for PCIE irq power debug */
+#ifdef CONFIG_MHI_DEBUG
+	if (g_msi_power[MSI_RESUME_SWITCH][0] == 0x88) {
+		g_msi_power[MSI_DATA_EVENT_INDEX][0] = MHI_TRE_GET_EV_CHID(local_rp);
+		MHI_ERR("wakeup chan: 0x%08x\n", MHI_TRE_GET_EV_CHID(local_rp));
+#ifdef debug
+		MHI_VERB("wakeup chan: 0x%08x\n", MHI_TRE_GET_EV_CHID(local_rp));
+#endif
+		g_msi_power[MSI_RESUME_SWITCH][0] = 0x0;
+	}
+#endif
+#endif /*VENDOR_EDIT*/
+
 	while (dev_rp != local_rp && event_quota > 0) {
 		enum MHI_PKT_TYPE type = MHI_TRE_GET_EV_TYPE(local_rp);
 
@@ -1395,10 +1477,6 @@ int mhi_process_data_event_ring(struct mhi_controller *mhi_cntrl,
 			local_rp->ptr, local_rp->dword[0], local_rp->dword[1]);
 
 		chan = MHI_TRE_GET_EV_CHID(local_rp);
-		if (chan >= mhi_cntrl->max_chan) {
-			MHI_ERR("invalid channel id %u\n", chan);
-			goto next_er_element;
-		}
 		mhi_chan = &mhi_cntrl->mhi_chan[chan];
 
 		if (likely(type == MHI_PKT_TYPE_TX_EVENT)) {
@@ -1409,7 +1487,6 @@ int mhi_process_data_event_ring(struct mhi_controller *mhi_cntrl,
 			event_quota--;
 		}
 
-next_er_element:
 		mhi_recycle_ev_ring_element(mhi_cntrl, ev_ring);
 		local_rp = ev_ring->rp;
 		dev_rp = mhi_to_virtual(ev_ring, er_ctxt->rp);
@@ -1564,7 +1641,7 @@ int mhi_process_bw_scale_ev_ring(struct mhi_controller *mhi_cntrl,
 	ev_ring->wp = dev_rp - 1;
 	if (ev_ring->wp < ev_ring->base)
 		ev_ring->wp = ev_ring->base + ev_ring->len - ev_ring->el_size;
-	mhi_recycle_ev_ring_element(mhi_cntrl, ev_ring);
+	mhi_recycle_fwd_ev_ring_element(mhi_cntrl, ev_ring);
 
 	read_lock_bh(&mhi_cntrl->pm_lock);
 	if (likely(MHI_DB_ACCESS_VALID(mhi_cntrl)))
@@ -1673,6 +1750,20 @@ irqreturn_t mhi_msi_handlr(int irq_number, void *dev)
 		struct mhi_chan *mhi_chan = mhi_event->mhi_chan;
 		struct mhi_device *mhi_dev = mhi_chan->mhi_dev;
 
+#ifdef VENDOR_EDIT
+/* Jianchao.Shi@PSW.BSP.Power.Basic, 2019/12/10, sjc Add for PCIE irq power debug */
+#ifdef CONFIG_MHI_DEBUG
+		if (g_msi_power[MSI_RESUME_SWITCH][0] == 0x88) {
+			g_msi_power[MSI_DATA_EVENT_INDEX][0] = mhi_chan->chan;
+			MHI_ERR("wakeup MSI: 0x%08x\n", mhi_chan->chan);
+#ifdef debug
+			MHI_VERB("wakeup MSI: 0x%08x\n", mhi_chan->chan);
+#endif
+			g_msi_power[MSI_RESUME_SWITCH][0] = 0x0;
+		}
+#endif
+#endif /*VENDOR_EDIT*/
+
 		if (mhi_dev)
 			mhi_dev->status_cb(mhi_dev, MHI_CB_PENDING_DATA);
 
@@ -1732,7 +1823,7 @@ irqreturn_t mhi_intvec_threaded_handlr(int irq_number, void *dev)
 		wake_up_all(&mhi_cntrl->state_event);
 
 		/* for fatal errors, we let controller decide next step */
-		if (MHI_IN_PBL(mhi_cntrl->ee))
+		if (MHI_IN_PBL(ee))
 			mhi_cntrl->status_cb(mhi_cntrl, mhi_cntrl->priv_data,
 					     MHI_CB_FATAL_ERROR);
 		else
@@ -1755,14 +1846,8 @@ irqreturn_t mhi_intvec_handlr(int irq_number, void *dev)
 	wake_up_all(&mhi_cntrl->state_event);
 	MHI_VERB("Exit\n");
 
-#ifndef CONFIG_QAIC
-	/*
-	 * Fixme: Todo: need to check some extra condition which modem
-	 * should test for scheduling low_priority_worker
-	 */
 	if (MHI_IN_MISSION_MODE(mhi_cntrl->ee))
 		schedule_work(&mhi_cntrl->low_priority_worker);
-#endif
 
 	return IRQ_WAKE_THREAD;
 }
@@ -1871,9 +1956,9 @@ int mhi_prepare_channel(struct mhi_controller *mhi_cntrl,
 
 	MHI_LOG("Entered: preparing channel:%d\n", mhi_chan->chan);
 
-	if (!(BIT(mhi_cntrl->ee) & mhi_chan->ee)) {
+	if (!(BIT(mhi_cntrl->ee) & mhi_chan->ee_mask)) {
 		MHI_ERR("Current EE:%s Required EE Mask:0x%x for chan:%s\n",
-			TO_MHI_EXEC_STR(mhi_cntrl->ee), mhi_chan->ee,
+			TO_MHI_EXEC_STR(mhi_cntrl->ee), mhi_chan->ee_mask,
 			mhi_chan->name);
 		return -ENOTCONN;
 	}

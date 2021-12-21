@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2014-2015, 2017-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2014-2015, 2017-2019, The Linux Foundation. All rights reserved.
  */
 
 #include <linux/coresight.h>
@@ -9,6 +9,12 @@
 #include <linux/sched/clock.h>
 #include <soc/qcom/sysmon.h>
 #include "esoc-mdm.h"
+#include "soc/oppo/boot_mode.h"
+
+#ifdef VENDOR_EDIT
+/*xing.xiong@BSP.Kernel.Driver, 2019/10/29, Add for 5G modem dump*/
+extern bool delay_panic;
+#endif
 
 enum gpio_update_config {
 	GPIO_UPDATE_BOOTING_CONFIG = 1,
@@ -38,9 +44,6 @@ static struct gpio_map {
 	{"qcom,mdm2ap-vddmin-gpio",     MDM2AP_VDDMIN},
 	{"qcom,ap2mdm-pmic-pwr-en-gpio", AP2MDM_PMIC_PWR_EN},
 	{"qcom,mdm-link-detect-gpio", MDM_LINK_DETECT},
-	{"qcom,m2-full-card-pwr-gpio", MDM2_CARD_PWR},
-	{"qcom,m2-rst-gpio", MDM2_RESET},
-	{"qcom,m2-w-disable1-gpio", MDM2_W_DISABLE1},
 };
 
 /* Required gpios */
@@ -366,9 +369,13 @@ static void mdm_status_fn(struct work_struct *work)
 	mdm_update_gpio_configs(mdm, GPIO_UPDATE_RUNNING_CONFIG);
 }
 
+
+bool modem_force_rst = false;
+
 static void mdm_get_restart_reason(struct work_struct *work)
 {
 	int ret, ntries = 0;
+
 	char sfr_buf[RD_BUF_SIZE];
 	struct mdm_ctrl *mdm =
 		container_of(work, struct mdm_ctrl, restart_reason_work);
@@ -390,6 +397,17 @@ static void mdm_get_restart_reason(struct work_struct *work)
 						__func__, ret);
 	}
 	mdm->get_restart_reason = false;
+
+#ifdef VENDOR_EDIT
+/*xing.xiong@BSP.Kernel.Driver, 2019/10/29, Add for 5G modem dump*/
+	if (delay_panic) {
+		snprintf(sfr_buf + strlen(sfr_buf),  RD_BUF_SIZE - strlen(sfr_buf), " :SDX5x esoc0 modem crash");
+		dev_err(dev, "SDX5x trigger dump after 5s !\n");
+		msleep(5000);
+		mdm_power_down(mdm);
+		panic(sfr_buf);
+	}
+#endif
 }
 
 void mdm_wait_for_status_low(struct mdm_ctrl *mdm, bool atomic)
@@ -1148,102 +1166,6 @@ err_destroy_wrkq:
 	return ret;
 }
 
-enum M2_CTRL_GPIO {
-	M2_FULL_CARD_PWR = 0,
-	M2_RST,
-	M2_W_DISABLE1,
-	M2_CTRL_MAX
-};
-struct m2_gpio_info{
-	char *name;
-	uint32_t num;
-};
-
-static struct m2_gpio_info gpio_info[M2_CTRL_MAX] = {
-        {"qcom,m2-full-card-pwr-gpio", 0},
-        {"qcom,m2-rst-gpio", 0},
-        {"qcom,m2-w-disable1-gpio", 0}
-};
-
-#define M2_DEBUG_LOG(fmt, ...) pr_err("[D][%s] " fmt, __func__, ##__VA_ARGS__)
-
-static int sdx55m_m2_setup_hw(struct mdm_ctrl *mdm,
-					const struct mdm_ops *ops,
-					struct platform_device *pdev)
-{
-	int ret;
-	struct device_node *node;
-	struct pinctrl *pinctrl;
-	struct pinctrl_state *pins_default;
-
-	M2_DEBUG_LOG("m2_setup_hw: entry!\n");
-
-	node = pdev->dev.of_node;
-
-	pinctrl = devm_pinctrl_get(&pdev->dev);
-	if (IS_ERR_OR_NULL(pinctrl)) {
-		dev_err(&pdev->dev,"m2_setup_hw: Get pinctrl error!\n");
-		return -1;
-	}
-	pins_default = pinctrl_lookup_state(pinctrl, "default");
-	if (IS_ERR(pins_default)) {
-		dev_err(&pdev->dev, "m2_setup_hw: Get pinctrl default error!\n");
-		return -1;
-	}
-
-	ret = of_get_named_gpio(node, gpio_info[M2_FULL_CARD_PWR].name, 0);
-	if (ret < 0) {
-	            dev_err(&pdev->dev, "Failed to get M2_FULL_CARD_PWR gpio !\n");
-	            return -1;
-	}
-	gpio_info[M2_FULL_CARD_PWR].num = ret;
-
-	ret = of_get_named_gpio(node, gpio_info[M2_RST].name, 0);
-	if (ret < 0) {
-	            dev_err(&pdev->dev, "Failed to get M2_RST gpio !\n");
-	            return -1;
-	}
-	gpio_info[M2_RST].num = ret;
-
-	ret = of_get_named_gpio(node, gpio_info[M2_W_DISABLE1].name, 0);
-	if (ret < 0) {
-	            dev_err(&pdev->dev, "Failed to get M2_W_DISABLE1 gpio !\n");
-	}
-	gpio_info[M2_W_DISABLE1].num = ret;
-
-
-	M2_DEBUG_LOG("m2_setup_hw: M2_FULL_CARD_PWR = %d, M2_RST = %d, M2_W_DISABLE1 = %d\n",
-			gpio_info[M2_FULL_CARD_PWR].num,
-			gpio_info[M2_RST].num,
-			gpio_info[M2_W_DISABLE1].num);
-
-	if (gpio_request(gpio_info[M2_FULL_CARD_PWR].num, gpio_info[M2_FULL_CARD_PWR].name)){
-		dev_err(&pdev->dev, "Failed to configure M2_FULL_CARD_PWR gpio!\n");
-	}
-	else
-		gpio_direction_output(gpio_info[M2_FULL_CARD_PWR].num, 1);
-
-	usleep_range(70000,70005);
-
-	if (gpio_request(gpio_info[M2_RST].num, gpio_info[M2_RST].name)){
-		dev_err(&pdev->dev, "Failed to configure M2_RST gpio !\n");
-	}
-	else
-		gpio_direction_output(gpio_info[M2_RST].num, 1);
-
-	usleep_range(7000,7005);
-
-	if (gpio_request(gpio_info[M2_W_DISABLE1].num, gpio_info[M2_W_DISABLE1].name)){
-		dev_err(&pdev->dev, "Failed to configure M2_W_DISABLE1 gpio !\n");
-	} else
-		gpio_direction_output(gpio_info[M2_W_DISABLE1].num, 1);
-
-	M2_DEBUG_LOG("m2_setup_hw: exit!\n");
-
-	return 0;
-}
-
-
 static struct esoc_clink_ops mdm_cops = {
 	.cmd_exe = mdm_cmd_exe,
 	.get_status = mdm_get_status,
@@ -1269,12 +1191,6 @@ static struct mdm_ops sdx55m_ops = {
 	.pon_ops = &sdx55m_pon_ops,
 };
 
-static struct mdm_ops sdx55m_m2_ops = {
-	.clink_ops = &mdm_cops,
-	.config_hw = sdx55m_m2_setup_hw,
-	.pon_ops = &sdx55m_m2_pon_ops,
-};
-
 static const struct of_device_id mdm_dt_match[] = {
 	{ .compatible = "qcom,ext-mdm9x55",
 		.data = &mdm9x55_ops, },
@@ -1282,8 +1198,6 @@ static const struct of_device_id mdm_dt_match[] = {
 		.data = &sdx50m_ops, },
 	{ .compatible = "qcom,ext-sdx55m",
 		.data = &sdx55m_ops, },
-	{ .compatible = "qcom,ext-sdx55m_m2",
-		.data = &sdx55m_m2_ops, },
 	{},
 };
 MODULE_DEVICE_TABLE(of, mdm_dt_match);
@@ -1295,8 +1209,6 @@ static int mdm_probe(struct platform_device *pdev)
 	struct device_node *node = pdev->dev.of_node;
 	struct mdm_ctrl *mdm;
 	int ret;
-
-	M2_DEBUG_LOG("mdm_probe: entry!\n");
 
 	match = of_match_node(mdm_dt_match, node);
 	if (IS_ERR_OR_NULL(match))
@@ -1328,6 +1240,11 @@ static struct platform_driver mdm_driver = {
 
 static int __init mdm_register(void)
 {
+	if (qpnp_is_power_off_charging() &&
+		(get_boot_mode() != MSM_BOOT_MODE__WLAN) &&
+		(get_boot_mode() != MSM_BOOT_MODE__RF))
+		return 0;
+
 	return platform_driver_register(&mdm_driver);
 }
 module_init(mdm_register);

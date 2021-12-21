@@ -11,6 +11,8 @@
 #include "esoc.h"
 #include "esoc-mdm.h"
 #include "mdm-dbg.h"
+#include "soc/oppo/oppo_project.h"
+#include "soc/oppo/boot_mode.h"
 
 /* Default number of powerup trial requests per session */
 #define ESOC_DEF_PON_REQ	3
@@ -420,7 +422,11 @@ static int mdm_handle_boot_fail(struct esoc_clink *esoc_clink, u8 *pon_trial)
 		break;
 	case BOOT_FAIL_ACTION_PANIC:
 		esoc_mdm_log("Calling panic!!\n");
-		panic("Panic requested on external modem boot failure\n");
+		if (get_eng_version() == AGING) {
+			pr_err("Panic requested on external modem boot failure, skip panic\n");
+		} else {
+			panic("Panic requested on external modem boot failure\n");
+		}
 		break;
 	case BOOT_FAIL_ACTION_NOP:
 		esoc_mdm_log("Leaving the modem in its curent state\n");
@@ -644,6 +650,12 @@ static struct esoc_drv esoc_ssr_drv = {
 
 int __init esoc_ssr_init(void)
 {
+
+	if (qpnp_is_power_off_charging() &&
+		(get_boot_mode() != MSM_BOOT_MODE__WLAN) &&
+		(get_boot_mode() != MSM_BOOT_MODE__RF))
+		return 0;
+
 	return esoc_drv_register(&esoc_ssr_drv);
 }
 module_init(esoc_ssr_init);

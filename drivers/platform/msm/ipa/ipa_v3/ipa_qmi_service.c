@@ -1702,7 +1702,6 @@ static struct qmi_msg_handler server_handlers[] = {
 		.decoded_size = sizeof(struct ipa_mhi_clk_vote_req_msg_v01),
 		.fn = ipa3_handle_mhi_vote_req,
 	},
-
 };
 
 /*  clinet_handlers are client callbacks that will be called from QMI context

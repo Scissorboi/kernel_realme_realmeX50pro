@@ -18,7 +18,13 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
-
+#ifdef VENDOR_EDIT
+/*tongfeng.huang@BSP.Kernel.Driver, 2019/10/28, Add for rtc bug*/
+#ifdef dev_dbg
+#undef dev_dbg
+#endif
+#define dev_dbg dev_err
+#endif
 /* RTC Register offsets from RTC CTRL REG */
 #define PM8XXX_ALARM_CTRL_OFFSET	0x01
 #define PM8XXX_RTC_WRITE_OFFSET		0x02
@@ -313,6 +319,10 @@ static int pm8xxx_rtc_alarm_irq_enable(struct device *dev, unsigned int enable)
 	struct pm8xxx_rtc *rtc_dd = dev_get_drvdata(dev);
 	const struct pm8xxx_rtc_regs *regs = rtc_dd->regs;
 	unsigned int ctrl_reg;
+#ifdef VENDOR_EDIT
+/* Hang.Zhao@PSW.BSP.CHG.Basic,2019/12/20, Modify for can't sleep with digital headset */
+	u8 value[NUM_8_BIT_RTC_REGS] = {0};
+#endif
 
 	spin_lock_irqsave(&rtc_dd->ctrl_reg_lock, irq_flags);
 
@@ -330,6 +340,14 @@ static int pm8xxx_rtc_alarm_irq_enable(struct device *dev, unsigned int enable)
 		dev_err(dev, "Write to RTC control register failed\n");
 		goto rtc_rw_fail;
 	}
+#ifdef VENDOR_EDIT
+/* Hang.Zhao@PSW.BSP.CHG.Basic,2019/12/20, Modify for can't sleep with digital headset */
+	if (!enable) {
+		rc = regmap_bulk_write(rtc_dd->regmap, regs->alarm_rw, value, NUM_8_BIT_RTC_REGS);
+		if (rc)
+			dev_err(dev, "Write to RTC ALARM register failed\n");
+	}
+#endif
 
 rtc_rw_fail:
 	spin_unlock_irqrestore(&rtc_dd->ctrl_reg_lock, irq_flags);

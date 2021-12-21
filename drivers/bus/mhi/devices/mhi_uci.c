@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.*/
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.*/
 
 #include <linux/cdev.h>
 #include <linux/device.h>
@@ -17,7 +17,6 @@
 #include <linux/wait.h>
 #include <linux/uaccess.h>
 #include <linux/mhi.h>
-#include <linux/tty.h>
 
 #define DEVICE_NAME "mhi"
 #define MHI_UCI_DRIVER_NAME "mhi_uci"
@@ -28,7 +27,6 @@ struct uci_chan {
 	struct list_head pending; /* user space waiting to read */
 	struct uci_buf *cur_buf; /* current buffer user space reading */
 	size_t rx_size;
-	struct mutex read_lock;
 };
 
 struct uci_buf {
@@ -52,7 +50,6 @@ struct uci_dev {
 	bool enabled;
 	u32 tiocm;
 	void *ipc_log;
-	struct ktermios	termios;
 };
 
 struct mhi_uci_drv {
@@ -168,34 +165,6 @@ static long mhi_uci_ioctl(struct file *file,
 			spin_lock_bh(&uci_chan->lock);
 			uci_dev->tiocm = mhi_dev->tiocm;
 			spin_unlock_bh(&uci_chan->lock);
-		}
-	}
-
-	if (uci_dev->enabled) {
-		switch (cmd) {
-		case TCGETS:
-#ifndef TCGETS2
-			ret = kernel_termios_to_user_termios((struct termios __user *)arg, &uci_dev->termios);
-#else
-			ret = kernel_termios_to_user_termios_1((struct termios __user *)arg, &uci_dev->termios);
-#endif
-		break;
-
-		case TCSETSF:
-		case TCSETS:
-#ifndef TCGETS2
-			ret = user_termios_to_kernel_termios(&uci_dev->termios, (struct termios __user *)arg);
-#else
-			ret = user_termios_to_kernel_termios_1(&uci_dev->termios, (struct termios __user *)arg);
-#endif
-		break;
-
-		case TCFLSH:
-			ret = 0;
-		break;
-
-		default:
-		break;
 		}
 	}
 
@@ -319,10 +288,6 @@ static ssize_t mhi_uci_write(struct file *file,
 
 		spin_unlock_bh(&uci_chan->lock);
 
-		nr_avail = mhi_get_no_free_descriptors(mhi_dev, DMA_TO_DEVICE);
-		if ((nr_avail == 0) && (file->f_flags & O_NONBLOCK))
-			return -EAGAIN;
-
 		/* wait for free descriptors */
 		ret = wait_event_interruptible(uci_chan->wq,
 			(!uci_dev->enabled) ||
@@ -400,12 +365,11 @@ static ssize_t mhi_uci_read(struct file *file,
 
 	MSG_VERB("Client provided buf len:%lu\n", count);
 
-	mutex_lock(&uci_chan->read_lock);
 	/* confirm channel is active */
 	spin_lock_bh(&uci_chan->lock);
 	if (!uci_dev->enabled) {
-		ret = -ERESTARTSYS;
-		goto unlock_spinlock;
+		spin_unlock_bh(&uci_chan->lock);
+		return -ERESTARTSYS;
 	}
 
 	/* No data available to read, wait */
@@ -413,24 +377,19 @@ static ssize_t mhi_uci_read(struct file *file,
 		MSG_VERB("No data available to read waiting\n");
 
 		spin_unlock_bh(&uci_chan->lock);
-
-		if (file->f_flags & O_NONBLOCK)
-			return -EAGAIN;
-
 		ret = wait_event_interruptible(uci_chan->wq,
 				(!uci_dev->enabled ||
 				 !list_empty(&uci_chan->pending)));
 		if (ret == -ERESTARTSYS) {
 			MSG_LOG("Exit signal caught for node\n");
-			ret = -ERESTARTSYS;
-			goto unlock_mutex;
+			return -ERESTARTSYS;
 		}
 
 		spin_lock_bh(&uci_chan->lock);
 		if (!uci_dev->enabled) {
 			MSG_LOG("node is disabled\n");
 			ret = -ERESTARTSYS;
-			goto unlock_spinlock;
+			goto read_error;
 		}
 	}
 
@@ -440,7 +399,7 @@ static ssize_t mhi_uci_read(struct file *file,
 						   struct uci_buf, node);
 		if (unlikely(!uci_buf)) {
 			ret = -EIO;
-			goto unlock_spinlock;
+			goto read_error;
 		}
 
 		list_del(&uci_buf->node);
@@ -457,7 +416,7 @@ static ssize_t mhi_uci_read(struct file *file,
 	ptr = uci_buf->data + (uci_buf->len - uci_chan->rx_size);
 	ret = copy_to_user(buf, ptr, to_copy);
 	if (ret)
-		goto unlock_spinlock;
+		return ret;
 
 	MSG_VERB("Copied %lu of %lu bytes\n", to_copy, uci_chan->rx_size);
 	uci_chan->rx_size -= to_copy;
@@ -477,7 +436,7 @@ static ssize_t mhi_uci_read(struct file *file,
 		if (ret) {
 			MSG_ERR("Failed to recycle element\n");
 			kfree(uci_buf->data);
-			goto unlock_spinlock;
+			goto read_error;
 		}
 
 		spin_unlock_bh(&uci_chan->lock);
@@ -485,14 +444,10 @@ static ssize_t mhi_uci_read(struct file *file,
 
 	MSG_VERB("Returning %lu bytes\n", to_copy);
 
-	mutex_unlock(&uci_chan->read_lock);
 	return to_copy;
 
-unlock_spinlock:
+read_error:
 	spin_unlock_bh(&uci_chan->lock);
-
-unlock_mutex:
-	mutex_unlock(&uci_chan->read_lock);
 
 	return ret;
 }
@@ -519,7 +474,6 @@ static int mhi_uci_open(struct inode *inode, struct file *filp)
 	mutex_lock(&uci_dev->mutex);
 	if (!uci_dev->enabled) {
 		MSG_ERR("Node exist, but not in active state!\n");
-		ret = -ENODEV;
 		goto error_open_chan;
 	}
 
@@ -628,24 +582,22 @@ static int mhi_uci_probe(struct mhi_device *mhi_dev,
 	mutex_init(&uci_dev->mutex);
 	uci_dev->mhi_dev = mhi_dev;
 
-	mutex_lock(&uci_dev->mutex);
-	mutex_lock(&mhi_uci_drv.lock);
-
 	minor = find_first_zero_bit(uci_minors, MAX_UCI_DEVICES);
 	if (minor >= MAX_UCI_DEVICES) {
-		mutex_unlock(&mhi_uci_drv.lock);
-		mutex_unlock(&uci_dev->mutex);
 		kfree(uci_dev);
 		return -ENOSPC;
 	}
 
+	mutex_lock(&uci_dev->mutex);
+	mutex_lock(&mhi_uci_drv.lock);
+
 	uci_dev->devt = MKDEV(mhi_uci_drv.major, minor);
 	uci_dev->dev = device_create(mhi_uci_drv.class, &mhi_dev->dev,
 				     uci_dev->devt, uci_dev,
-				     DEVICE_NAME "_%04x_%02u.%02u.%02u%s%s",
+				     DEVICE_NAME "_%04x_%02u.%02u.%02u%s%d",
 				     mhi_dev->dev_id, mhi_dev->domain,
-				     mhi_dev->bus, mhi_dev->slot, "_",
-				     mhi_dev->chan_name);
+				     mhi_dev->bus, mhi_dev->slot, "_pipe_",
+				     mhi_dev->ul_chan_id);
 	set_bit(minor, uci_minors);
 
 	/* create debugging buffer */
@@ -661,10 +613,8 @@ static int mhi_uci_probe(struct mhi_device *mhi_dev,
 		spin_lock_init(&uci_chan->lock);
 		init_waitqueue_head(&uci_chan->wq);
 		INIT_LIST_HEAD(&uci_chan->pending);
-		mutex_init(&uci_chan->read_lock);
 	}
 
-	uci_dev->termios = tty_std_termios;
 	uci_dev->mtu = min_t(size_t, id->driver_data, mhi_dev->mtu);
 	uci_dev->actual_mtu = uci_dev->mtu -  sizeof(struct uci_buf);
 	mhi_device_set_devdata(mhi_dev, uci_dev);
@@ -745,11 +695,6 @@ static const struct mhi_device_id mhi_uci_match_table[] = {
 	{ .chan = "QMI1", .driver_data = 0x1000 },
 	{ .chan = "TF", .driver_data = 0x1000 },
 	{ .chan = "DUN", .driver_data = 0x1000 },
-	{ .chan = "DIAG", .driver_data = 0x800 },
-	{ .chan = "QAIC_DIAG", .driver_data = 0x1000 },
-	{ .chan = "QAIC_SAHARA", .driver_data = 0x8000 },
-	{ .chan = "QAIC_QDSS", .driver_data = 0x1000 },
-	{ .chan = "QAIC_TIMESYNC", .driver_data = 0x1000 },
 	{},
 };
 
@@ -776,33 +721,20 @@ static int mhi_uci_init(void)
 
 	mhi_uci_drv.major = ret;
 	mhi_uci_drv.class = class_create(THIS_MODULE, MHI_UCI_DRIVER_NAME);
-	if (IS_ERR(mhi_uci_drv.class)) {
-		unregister_chrdev(mhi_uci_drv.major, MHI_UCI_DRIVER_NAME);
+	if (IS_ERR(mhi_uci_drv.class))
 		return -ENODEV;
-	}
 
 	mutex_init(&mhi_uci_drv.lock);
 	INIT_LIST_HEAD(&mhi_uci_drv.head);
 
 	ret = mhi_driver_register(&mhi_uci_driver);
-	if (ret) {
+	if (ret)
 		class_destroy(mhi_uci_drv.class);
-		unregister_chrdev(mhi_uci_drv.major, MHI_UCI_DRIVER_NAME);
-	}
 
 	return ret;
 }
 
-static void __exit mhi_uci_exit(void)
-{
-	mhi_driver_unregister(&mhi_uci_driver);
-	class_destroy(mhi_uci_drv.class);
-	unregister_chrdev(mhi_uci_drv.major, MHI_UCI_DRIVER_NAME);
-}
-
 module_init(mhi_uci_init);
-module_exit(mhi_uci_exit);
-
 MODULE_LICENSE("GPL v2");
-MODULE_ALIAS("pci:v000017CBd0000A100sv*sd*bc*sc*i*");
+MODULE_ALIAS("MHI_UCI");
 MODULE_DESCRIPTION("MHI UCI Driver");

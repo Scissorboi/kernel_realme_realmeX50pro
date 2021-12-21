@@ -338,7 +338,10 @@ static void mhi_boot_monitor(void *data, async_cookie_t cookie)
 	struct mhi_controller *mhi_cntrl = data;
 	struct mhi_dev *mhi_dev = mhi_controller_get_devdata(mhi_cntrl);
 	struct arch_info *arch_info = mhi_dev->arch_info;
+	#ifndef VENDOR_EDIT
+	//yunqingzeng@basic.power.basic 2020/01/06 Modify for sync qcom fix patch Iddc3d560fa687399434cc8ad51c08509ddfadf70 which is about 50mA@8V standby issue.
 	struct mhi_device *boot_dev;
+	#endif
 	/* 15 sec timeout for booting device */
 	const u32 timeout = msecs_to_jiffies(15000);
 
@@ -353,10 +356,12 @@ static void mhi_boot_monitor(void *data, async_cookie_t cookie)
 
 	/* if we successfully booted to amss disable boot log channel */
 	if (mhi_cntrl->ee == MHI_EE_AMSS) {
+		#ifndef VENDOR_EDIT
+		//yunqingzeng@basic.power.basic 2020/01/06 Modify for sync qcom fix patch Iddc3d560fa687399434cc8ad51c08509ddfadf70 which is about 50mA@8V standby issue.
 		boot_dev = arch_info->boot_dev;
 		if (boot_dev)
 			mhi_unprepare_from_transfer(boot_dev);
-
+		#endif
 		if (!mhi_dev->drv_supported || arch_info->drv_connected)
 			pm_runtime_allow(&mhi_dev->pci_dev->dev);
 	}
@@ -373,6 +378,20 @@ int mhi_arch_power_up(struct mhi_controller *mhi_cntrl)
 
 	return 0;
 }
+
+#ifdef VENDOR_EDIT
+//yunqingzeng@basic.power.basic 2020/01/06 Modify for sync qcom fix patch Iddc3d560fa687399434cc8ad51c08509ddfadf70 which is about 50mA@8V standby issue.
+void mhi_arch_mission_mode_enter(struct mhi_controller *mhi_cntrl)
+{
+ struct mhi_dev *mhi_dev = mhi_controller_get_devdata(mhi_cntrl);
+ struct arch_info *arch_info = mhi_dev->arch_info;
+ struct mhi_device *boot_dev = arch_info->boot_dev;
+
+ /* disable boot logger channel */
+ if (boot_dev)
+ mhi_unprepare_from_transfer(boot_dev);
+}
+#endif
 
 static  int mhi_arch_pcie_scale_bw(struct mhi_controller *mhi_cntrl,
 				   struct pci_dev *pci_dev,
@@ -606,7 +625,8 @@ static int mhi_arch_drv_suspend(struct mhi_controller *mhi_cntrl)
 
 	/* do a drv hand off */
 	ret = msm_pcie_pm_control(MSM_PCIE_DRV_SUSPEND, mhi_cntrl->bus,
-				  pci_dev, NULL, 0);
+				  pci_dev, NULL, mhi_cntrl->wake_set ?
+				  MSM_PCIE_CONFIG_NO_L1SS_TO : 0);
 
 	/*
 	 * we failed to suspend and scaled down pcie bw.. need to scale up again

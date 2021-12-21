@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Copyright (c) 2018-2020, The Linux Foundation. All rights reserved.*/
+/* Copyright (c) 2018-2019, The Linux Foundation. All rights reserved.*/
 
 #include <asm/arch_timer.h>
 #include <linux/debugfs.h>
@@ -414,19 +414,19 @@ static int mhi_force_suspend(struct mhi_controller *mhi_cntrl)
 		if (!ret || ret != -EBUSY)
 			break;
 
-		MHI_LOG("MHI busy, sleeping and retry\n");
+		MHI_ERR("MHI busy, sleeping and retry\n");
 		msleep(delayms);
 	}
 
-	if (ret)
+	if (ret) {
+		MHI_ERR("Force suspend ret with %d\n", ret);
 		goto exit_force_suspend;
+	}
 
 	mhi_dev->suspend_mode = MHI_DEFAULT_SUSPEND;
 	ret = mhi_arch_link_suspend(mhi_cntrl);
 
 exit_force_suspend:
-	MHI_LOG("Force suspend ret with %d\n", ret);
-
 	mutex_unlock(&mhi_cntrl->pm_mutex);
 
 	return ret;
@@ -634,9 +634,15 @@ static void mhi_status_cb(struct mhi_controller *mhi_cntrl,
 		 */
 		pm_runtime_get(dev);
 		ret = mhi_force_suspend(mhi_cntrl);
-		if (!ret)
+		if (!ret) {
+			MHI_LOG("Attempt resume after forced suspend\n");
 			mhi_runtime_resume(dev);
+		}
 		pm_runtime_put(dev);
+		#ifdef VENDOR_EDIT
+		//yunqingzeng@basic.power.basic 2020/01/06 Modify for sync qcom fix patch Iddc3d560fa687399434cc8ad51c08509ddfadf70 which is about 50mA@8V standby issue.
+		mhi_arch_mission_mode_enter(mhi_cntrl);
+		#endif
 		break;
 	default:
 		MHI_ERR("Unhandled cb:0x%x\n", reason);
@@ -769,18 +775,13 @@ static struct mhi_controller *mhi_register_controller(struct pci_dev *pci_dev)
 
 	mhi_cntrl->iova_start = memblock_start_of_DRAM();
 	mhi_cntrl->iova_stop = memblock_end_of_DRAM();
+    mhi_cntrl->need_force_m3 = true;
 
 	mhi_cntrl->need_force_m3 = true;
 
 	/* setup host support for SFR retreival */
-	if (of_property_read_bool(of_node, "mhi,sfr-support")) {
-#ifdef CONFIG_ENABLE_MODEM_CARD
-		if (mhi_cntrl->dev_id == 0x0306)
-			mhi_cntrl->sfr_len = 0;
-		else
-#endif
-			mhi_cntrl->sfr_len = MHI_MAX_SFR_LEN;
-	}
+	if (of_property_read_bool(of_node, "mhi,sfr-support"))
+		mhi_cntrl->sfr_len = MHI_MAX_SFR_LEN;
 
 	of_node = of_parse_phandle(mhi_cntrl->of_node, "qcom,iommu-group", 0);
 	if (of_node) {
@@ -946,9 +947,7 @@ static struct pci_device_id mhi_pcie_device_id[] = {
 	{PCI_DEVICE(MHI_PCIE_VENDOR_ID, 0x0303)},
 	{PCI_DEVICE(MHI_PCIE_VENDOR_ID, 0x0304)},
 	{PCI_DEVICE(MHI_PCIE_VENDOR_ID, 0x0305)},
-#ifdef CONFIG_ENABLE_MODEM_CARD
 	{PCI_DEVICE(MHI_PCIE_VENDOR_ID, 0x0306)},
-#endif
 	{PCI_DEVICE(MHI_PCIE_VENDOR_ID, MHI_PCIE_DEBUG_ID)},
 	{0},
 };

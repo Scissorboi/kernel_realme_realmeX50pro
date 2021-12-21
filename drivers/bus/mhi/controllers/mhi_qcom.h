@@ -70,7 +70,10 @@ int mhi_pci_probe(struct pci_dev *pci_dev,
 void mhi_reg_write_work(struct work_struct *w);
 
 #ifdef CONFIG_ARCH_QCOM
-
+#ifdef VENDOR_EDIT
+//yunqingzeng@basic.power.basic 2020/01/06 Modify for sync qcom fix patch Iddc3d560fa687399434cc8ad51c08509ddfadf70 which is about 50mA@8V standby issue.
+void mhi_arch_mission_mode_enter(struct mhi_controller *mhi_cntrl);
+#endif
 int mhi_arch_power_up(struct mhi_controller *mhi_cntrl);
 int mhi_arch_pcie_init(struct mhi_controller *mhi_cntrl);
 void mhi_arch_pcie_deinit(struct mhi_controller *mhi_cntrl);
@@ -78,7 +81,6 @@ int mhi_arch_link_suspend(struct mhi_controller *mhi_cntrl);
 int mhi_arch_link_resume(struct mhi_controller *mhi_cntrl);
 
 #else
-
 static inline int mhi_arch_pcie_init(struct mhi_controller *mhi_cntrl)
 {
 	return 0;
@@ -102,7 +104,12 @@ static inline int mhi_arch_power_up(struct mhi_controller *mhi_cntrl)
 {
 	return 0;
 }
-
+#ifdef VENDOR_EDIT
+//yunqingzeng@basic.power.basic 2020/01/06 Modify for sync qcom fix patch Iddc3d560fa687399434cc8ad51c08509ddfadf70 which is about 50mA@8V standby issue.
+static inline void mhi_arch_mission_mode_enter(struct mhi_controller *mhi_cntrl)
+{
+}
+#endif
 #endif
 
 #endif /* _MHI_QCOM_ */
