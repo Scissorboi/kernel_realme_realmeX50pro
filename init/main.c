@@ -102,6 +102,11 @@
 #define CREATE_TRACE_POINTS
 #include <trace/events/initcall.h>
 
+#ifdef VENDOR_EDIT
+// Bin.Xu @ BSP.Kernel.Stability, 2019/12/23, Add for forcedump & tp log
+#include<linux/oppo_key_handle.h>
+#endif /* VENDOR_EDIT */
+
 static int kernel_init(void *);
 
 extern void init_IRQ(void);
@@ -458,6 +463,15 @@ static int __init do_early_param(char *param, char *val,
 		}
 	}
 	/* We accept everything at this stage. */
+#ifdef VENDOR_EDIT
+// Bin.Xu @ BSP.Kernel.Stability, 2019/12/02, Add for oppo_key_handle.
+#ifdef CONFIG_OPPO_KEY_HANDLE
+	if (strcmp(param, "password_base") == 0)
+		get_passwd_base(val);
+#endif
+#endif /* VENDOR_EDIT */
+
+
 	return 0;
 }
 
@@ -952,12 +966,25 @@ static void __init do_initcall_level(int level)
 		do_one_initcall(initcall_from_entry(fn));
 }
 
+#ifdef VENDOR_EDIT
+//cuixiaogang@SRC.hypnus.2019-1-3. add for hypnusd
+#ifdef CONFIG_OPPO_HYPNUS
+extern int __init hypnus_init(void);
+#endif
+#endif /* VENDOR_EDIT */
+
 static void __init do_initcalls(void)
 {
 	int level;
 
 	for (level = 0; level < ARRAY_SIZE(initcall_levels) - 1; level++)
 		do_initcall_level(level);
+	#ifdef VENDOR_EDIT
+//cuixiaogang@SRC.hypnus.2019-1-3. add for hypnusd
+#ifdef CONFIG_OPPO_HYPNUS
+	hypnus_init();
+#endif
+#endif /* VENDOR_EDIT */
 }
 
 /*
