@@ -3148,7 +3148,12 @@ EXPORT_SYMBOL_GPL(clk_set_flags);
 
 static struct dentry *rootdir;
 static int inited = 0;
+#ifndef VENDOR_EDIT
+//PengNan@BSP.CHG.Basic 2019/09/17 modify for power debug
 static u32 debug_suspend;
+#else
+static u32 debug_suspend = 1;
+#endif /* VENDOR_EDIT */
 static DEFINE_MUTEX(clk_debug_lock);
 static HLIST_HEAD(clk_debug_list);
 
@@ -3906,10 +3911,24 @@ static void clk_debug_unregister(struct clk_core *core)
  * Print the names of all enabled clocks and their parents if
  * debug_suspend is set from debugfs.
  */
+//yangmingjin@BSP.POWER.Basic 2019/05/30 add for RM_TAG_POWER_DEBUG
+#ifdef VENDOR_EDIT
+extern bool is_not_in_xo_mode(void);
+#endif
+/* VENDOR_EDIT */
 void clock_debug_print_enabled(void)
 {
+//yangmingjin@BSP.POWER.Basic 2019/05/30 add for RM_TAG_POWER_DEBUG
+#ifdef VENDOR_EDIT
+    if (likely(!debug_suspend) && !is_not_in_xo_mode())
+        return;
+    if(is_not_in_xo_mode())
+        printk(KERN_ERR"[RM_POWER]: warning!!! system can not enter xo mode.\n");
+#else
 	if (likely(!debug_suspend))
 		return;
+#endif
+/* VENDOR_EDIT */
 
 	clock_debug_print_enabled_debug_suspend(NULL);
 }
