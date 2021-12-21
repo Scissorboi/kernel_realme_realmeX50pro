@@ -22,6 +22,8 @@
 #include <linux/soc/qcom/smem.h>
 #include <soc/qcom/boot_stats.h>
 
+#include <soc/oppo/oppo_project.h>
+
 #define BUILD_ID_LENGTH 32
 #define CHIP_ID_LENGTH 32
 #define SMEM_IMAGE_VERSION_BLOCKS_COUNT 32
@@ -228,6 +230,12 @@ static union {
 
 /* max socinfo format version supported */
 #define MAX_SOCINFO_FORMAT SOCINFO_VERSION(0, 15)
+
+#ifdef VENDOR_EDIT
+/*xing.xiong@BSP.Kernel.Driver, 2019/11/04, Add for fake cpu id*/
+static char *fake_cpu_id = "SM8150";
+static char *real_cpu_id = "SM8250";
+#endif
 
 static struct msm_soc_info cpu_of_id[] = {
 	[0]  = {MSM_CPU_UNKNOWN, "Unknown CPU"},
@@ -1601,6 +1609,14 @@ int __init socinfo_init(void)
 		pr_warn("New IDs added! ID => CPU mapping needs an update.\n");
 
 	cur_cpu = cpu_of_id[socinfo->v0_1.id].generic_soc_type;
+#ifdef VENDOR_EDIT
+/*xing.xiong@BSP.Kernel.Driver, 2019/11/04, Add for fake cpu id*/
+	if (is_confidential()) {
+		cpu_of_id[socinfo->v0_1.id].soc_id_string = fake_cpu_id;
+	} else {
+		cpu_of_id[socinfo->v0_1.id].soc_id_string = real_cpu_id;
+	}
+#endif
 	boot_stats_init();
 	socinfo_print();
 	arch_read_hardware_id = msm_read_hardware_id;
