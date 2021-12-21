@@ -11,6 +11,12 @@
 #include <linux/random.h>
 #include <soc/qcom/scm.h>
 #include <soc/qcom/secure_buffer.h>
+#if defined(VENDOR_EDIT) && defined(CONFIG_VIRTUAL_RESERVE_MEMORY)
+/* Kui.Zhang@PSW.TEC.KERNEL.Performance, 2019/01/22,
+ * record the gpu highest addr
+ */
+#include <linux/resmap_account.h>
+#endif
 
 #include "adreno.h"
 #include "kgsl_device.h"
@@ -646,7 +652,7 @@ static void _get_entries(struct kgsl_process_private *private,
 		prev->flags = p->memdesc.flags;
 		prev->priv = p->memdesc.priv;
 		prev->pending_free = p->pending_free;
-		prev->pid = pid_nr(private->pid);
+		prev->pid = private->pid;
 		__kgsl_get_memory_usage(prev);
 	}
 
@@ -656,7 +662,7 @@ static void _get_entries(struct kgsl_process_private *private,
 		next->flags = n->memdesc.flags;
 		next->priv = n->memdesc.priv;
 		next->pending_free = n->pending_free;
-		next->pid = pid_nr(private->pid);
+		next->pid = private->pid;
 		__kgsl_get_memory_usage(next);
 	}
 }
@@ -784,7 +790,7 @@ static int kgsl_iommu_fault_handler(struct iommu_domain *domain,
 	private = kgsl_iommu_get_process(ptbase);
 
 	if (private) {
-		pid = pid_nr(private->pid);
+		pid = private->pid;
 		comm = private->comm;
 	}
 
@@ -1038,6 +1044,14 @@ static void setup_64bit_pagetable(struct kgsl_mmu *mmu,
 		pt->compat_va_end = KGSL_IOMMU_SECURE_BASE(mmu);
 		pt->va_start = KGSL_IOMMU_VA_BASE64;
 		pt->va_end = KGSL_IOMMU_VA_END64;
+
+#if defined(VENDOR_EDIT) && defined(CONFIG_VIRTUAL_RESERVE_MEMORY)
+		/* Kui.Zhang@PSW.TEC.KERNEL.Performance, 2019/03/18,
+		 * record the high limit of gpu mmap_base, used for create
+		 * reserved area
+		 */
+		gpu_compat_high_limit_addr = pt->compat_va_end;
+#endif
 	}
 
 	if (pagetable->name != KGSL_MMU_GLOBAL_PT &&
@@ -2409,22 +2423,6 @@ static uint64_t kgsl_iommu_find_svm_region(struct kgsl_pagetable *pagetable,
 	return addr;
 }
 
-static bool iommu_addr_in_svm_ranges(struct kgsl_iommu_pt *pt,
-	u64 gpuaddr, u64 size)
-{
-	if ((gpuaddr >= pt->compat_va_start && gpuaddr < pt->compat_va_end) &&
-		((gpuaddr + size) > pt->compat_va_start &&
-			(gpuaddr + size) <= pt->compat_va_end))
-		return true;
-
-	if ((gpuaddr >= pt->svm_start && gpuaddr < pt->svm_end) &&
-		((gpuaddr + size) > pt->svm_start &&
-			(gpuaddr + size) <= pt->svm_end))
-		return true;
-
-	return false;
-}
-
 static int kgsl_iommu_set_svm_region(struct kgsl_pagetable *pagetable,
 		uint64_t gpuaddr, uint64_t size)
 {
@@ -2432,8 +2430,9 @@ static int kgsl_iommu_set_svm_region(struct kgsl_pagetable *pagetable,
 	struct kgsl_iommu_pt *pt = pagetable->priv;
 	struct rb_node *node;
 
-	/* Make sure the requested address doesn't fall out of SVM range */
-	if (!iommu_addr_in_svm_ranges(pt, gpuaddr, size))
+	/* Make sure the requested address doesn't fall in the global range */
+	if (ADDR_IN_GLOBAL(pagetable->mmu, gpuaddr) ||
+			ADDR_IN_GLOBAL(pagetable->mmu, gpuaddr + size))
 		return -ENOMEM;
 
 	spin_lock(&pagetable->lock);
@@ -2461,37 +2460,13 @@ out:
 	return ret;
 }
 
-static int get_gpuaddr(struct kgsl_pagetable *pagetable,
-		struct kgsl_memdesc *memdesc, u64 start, u64 end,
-		u64 size, unsigned int align)
-{
-	u64 addr;
-	int ret;
-
-	spin_lock(&pagetable->lock);
-	addr = _get_unmapped_area(pagetable, start, end, size, align);
-	if (addr == (u64) -ENOMEM) {
-		spin_unlock(&pagetable->lock);
-		return -ENOMEM;
-	}
-
-	ret = _insert_gpuaddr(pagetable, addr, size);
-	spin_unlock(&pagetable->lock);
-
-	if (ret == 0) {
-		memdesc->gpuaddr = addr;
-		memdesc->pagetable = pagetable;
-	}
-
-	return ret;
-}
 
 static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 		struct kgsl_memdesc *memdesc)
 {
 	struct kgsl_iommu_pt *pt = pagetable->priv;
 	int ret = 0;
-	u64 start, end, size;
+	uint64_t addr, start, end, size;
 	unsigned int align;
 
 	if (WARN_ON(kgsl_memdesc_use_cpu_map(memdesc)))
@@ -2521,13 +2496,23 @@ static int kgsl_iommu_get_gpuaddr(struct kgsl_pagetable *pagetable,
 	if (kgsl_memdesc_is_secured(memdesc))
 		start += secure_global_size;
 
-	ret = get_gpuaddr(pagetable, memdesc, start, end, size, align);
-	/* if OoM, retry once after flushing mem_wq */
-	if (ret == -ENOMEM) {
-		flush_workqueue(kgsl_driver.mem_workqueue);
-		ret = get_gpuaddr(pagetable, memdesc, start, end, size, align);
+	spin_lock(&pagetable->lock);
+
+	addr = _get_unmapped_area(pagetable, start, end, size, align);
+
+	if (addr == (uint64_t) -ENOMEM) {
+		ret = -ENOMEM;
+		goto out;
 	}
 
+	ret = _insert_gpuaddr(pagetable, addr, size);
+	if (ret == 0) {
+		memdesc->gpuaddr = addr;
+		memdesc->pagetable = pagetable;
+	}
+
+out:
+	spin_unlock(&pagetable->lock);
 	return ret;
 }
 

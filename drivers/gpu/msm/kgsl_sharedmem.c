@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Copyright (c) 2002,2007-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  */
 
 #include <asm/cacheflush.h>
@@ -295,9 +295,9 @@ void kgsl_process_init_sysfs(struct kgsl_device *device,
 	kgsl_process_private_get(private);
 
 	if (kobject_init_and_add(&private->kobj, &ktype_mem_entry,
-		kgsl_driver.prockobj, "%d", pid_nr(private->pid))) {
+		kgsl_driver.prockobj, "%d", private->pid)) {
 		dev_err(device->dev, "Unable to add sysfs for process %d\n",
-			pid_nr(private->pid));
+			private->pid);
 		return;
 	}
 
@@ -312,7 +312,7 @@ void kgsl_process_init_sysfs(struct kgsl_device *device,
 		if (ret)
 			dev_err(device->dev,
 				"Unable to create sysfs files for process %d\n",
-				pid_nr(private->pid));
+				private->pid);
 	}
 
 	for (i = 0; i < ARRAY_SIZE(debug_memstats); i++) {
@@ -322,6 +322,14 @@ void kgsl_process_init_sysfs(struct kgsl_device *device,
 				debug_memstats[i].attr.name);
 	}
 }
+
+#ifdef VENDOR_EDIT
+//Jiheng.Xie@TECH.BSP.Performance, 2019-07-22, add for  gpu total used account
+unsigned long gpu_total(void)
+{
+	return (unsigned long)atomic_long_read(&kgsl_driver.stats.page_alloc);
+}
+#endif /*VENDOR_EDIT*/
 
 static ssize_t memstat_show(struct device *dev,
 			 struct device_attribute *attr, char *buf)
@@ -889,7 +897,6 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 	unsigned int pcount = 0;
 	size_t len;
 	unsigned int align;
-	bool memwq_flush_done = false;
 
 	static DEFINE_RATELIMIT_STATE(_rs,
 					DEFAULT_RATELIMIT_INTERVAL,
@@ -964,13 +971,6 @@ kgsl_sharedmem_page_alloc_user(struct kgsl_memdesc *memdesc,
 		if (page_count <= 0) {
 			if (page_count == -EAGAIN)
 				continue;
-
-			/* if OoM, retry once after flushing mem_wq */
-			if (page_count == -ENOMEM && !memwq_flush_done) {
-				flush_workqueue(kgsl_driver.mem_workqueue);
-				memwq_flush_done = true;
-				continue;
-			}
 
 			/*
 			 * Update sglen and memdesc size,as requested allocation

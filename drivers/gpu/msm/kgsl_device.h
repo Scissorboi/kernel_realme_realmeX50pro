@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-only */
 /*
- * Copyright (c) 2002,2007-2020, The Linux Foundation. All rights reserved.
+ * Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
  */
 #ifndef __KGSL_DEVICE_H
 #define __KGSL_DEVICE_H
@@ -320,6 +320,10 @@ struct kgsl_device {
 	unsigned int num_l3_pwrlevels;
 	/* store current L3 vote to determine if we should change our vote */
 	unsigned int cur_l3_pwrlevel;
+#ifdef VENDOR_EDIT
+//wenhua.Leng@PSW.MM.Display.GPU.minidump,2019-04-21
+	bool snapshot_control;
+#endif /*VENDOR_EDIT*/
 };
 
 #define KGSL_MMU_DEVICE(_mmu) \
@@ -417,13 +421,13 @@ struct kgsl_context {
 #define pr_context(_d, _c, fmt, args...) \
 		dev_err((_d)->dev, "%s[%d]: " fmt, \
 		_context_comm((_c)), \
-		pid_nr((_c)->proc_priv->pid), ##args)
+		(_c)->proc_priv->pid, ##args)
 
 /**
  * struct kgsl_process_private -  Private structure for a KGSL process (across
  * all devices)
  * @priv: Internal flags, use KGSL_PROCESS_* values
- * @pid: Identification structure for the task owner of the process
+ * @pid: ID for the task owner of the process
  * @comm: task name of the process
  * @mem_lock: Spinlock to protect the process memory lists
  * @refcount: kref object for reference counting the process
@@ -441,7 +445,7 @@ struct kgsl_context {
  */
 struct kgsl_process_private {
 	unsigned long priv;
-	struct pid *pid;
+	pid_t pid;
 	char comm[TASK_COMM_LEN];
 	spinlock_t mem_lock;
 	struct kref refcount;
@@ -523,6 +527,10 @@ struct kgsl_snapshot {
 	bool first_read;
 	bool gmu_fault;
 	bool recovered;
+#ifdef VENDOR_EDIT
+//wenhua.Leng@PSW.MM.Display.GPU.minidump,2019-04-21
+	uint32_t snapshot_hashid;
+#endif /*VENDOR_EDIT*/
 	struct kgsl_device *device;
 };
 
@@ -564,7 +572,7 @@ static inline void kgsl_process_sub_stats(struct kgsl_process_private *priv,
 	struct mm_struct *mm;
 
 	atomic_long_sub(size, &priv->stats[type].cur);
-	pid_struct = find_get_pid(pid_nr(priv->pid));
+	pid_struct = find_get_pid(priv->pid);
 	if (pid_struct) {
 		task = get_pid_task(pid_struct, PIDTYPE_PID);
 		if (task) {

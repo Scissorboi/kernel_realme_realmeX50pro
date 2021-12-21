@@ -55,3 +55,7 @@ msm_adreno-objs = $(msm_adreno-y)
 
 obj-$(CONFIG_QCOM_KGSL) += msm_kgsl_core.o
 obj-$(CONFIG_QCOM_KGSL) += msm_adreno.o
+#if defined(VENDOR_EDIT) && defined(CONFIG_VIRTUAL_RESERVE_MEMORY)
+#/* Kui.Zhang@TEC.Kernel.Performance, 2019-03-13, kgsl try reserved area in critical*/
+obj-$(CONFIG_VIRTUAL_RESERVE_MEMORY) += kgsl_reserved_area.o
+#endif /*defined(VENDOR_EDIT) && defined(CONFIG_VIRTUAL_RESERVE_MEMORY)*/
