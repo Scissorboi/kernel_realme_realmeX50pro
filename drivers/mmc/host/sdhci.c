@@ -1894,6 +1894,20 @@ static bool sdhci_check_state(struct sdhci_host *host)
 		return false;
 }
 
+#ifdef VENDOR_EDIT
+//jie.cheng@swdp.shanghai, 2016-08-10 Add emmc scaling control api
+bool sdhci_check_pwr(struct mmc_host *mmc)
+{
+	struct sdhci_host *host = mmc_priv(mmc);
+	if (!host->pwr) {
+		pr_err("sdhci pwr is 0! clk is %d\n", host->clock);
+		return true;
+	} else
+		return false;
+}
+EXPORT_SYMBOL(sdhci_check_pwr);
+#endif
+
 static bool sdhci_check_auto_tuning(struct sdhci_host *host,
 				  struct mmc_command *cmd)
 {
