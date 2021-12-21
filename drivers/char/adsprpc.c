@@ -140,7 +140,6 @@
 #define FASTRPC_CPUINFO_DEFAULT (0)
 #define FASTRPC_CPUINFO_EARLY_WAKEUP (1)
 
-#define MAX_SIZE_LIMIT (0x78000000)
 #define INIT_FILELEN_MAX (2*1024*1024)
 #define INIT_MEMLEN_MAX  (8*1024*1024)
 #define MAX_CACHE_BUF_SIZE (8*1024*1024)
@@ -384,7 +383,6 @@ struct fastrpc_apps {
 	uint64_t jobid[NUM_CHANNELS];
 	struct wakeup_source *wake_source;
 	struct qos_cores silvercores;
-	uint32_t max_size_limit;
 };
 
 struct fastrpc_mmap {
@@ -786,19 +784,11 @@ static int fastrpc_mmap_find(struct fastrpc_file *fl, int fd,
 static int dma_alloc_memory(dma_addr_t *region_phys, void **vaddr, size_t size,
 					unsigned long dma_attr)
 {
-	int err = 0;
 	struct fastrpc_apps *me = &gfa;
 
 	if (me->dev == NULL) {
 		pr_err("device adsprpc-mem is not initialized\n");
 		return -ENODEV;
-	}
-	VERIFY(err, size > 0 && size < MAX_SIZE_LIMIT);
-	if (err) {
-		err = -EFAULT;
-		pr_err("adsprpc: %s: invalid allocation size 0x%zx\n",
-			__func__, size);
-		return err;
 	}
 	*vaddr = dma_alloc_attrs(me->dev, size, region_phys,
 					GFP_KERNEL, dma_attr);
@@ -852,30 +842,17 @@ static void fastrpc_mmap_free(struct fastrpc_mmap *map, uint32_t flags)
 {
 	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_file *fl;
-	int vmid, cid = -1, err = 0;
+	int vmid;
 	struct fastrpc_session_ctx *sess;
 
 	if (!map)
 		return;
 	fl = map->fl;
-	if (fl && !(map->flags == ADSP_MMAP_HEAP_ADDR ||
-				map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR)) {
-		cid = fl->cid;
-		VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
-		if (err) {
-			err = -ECHRNG;
-			pr_err("adsprpc: ERROR:%s, Invalid channel id: %d, err:%d\n",
-				__func__, cid, err);
-			return;
-		}
-	}
 	if (map->flags == ADSP_MMAP_HEAP_ADDR ||
 				map->flags == ADSP_MMAP_REMOTE_HEAP_ADDR) {
-		spin_lock(&me->hlock);
 		map->refs--;
 		if (!map->refs)
 			hlist_del_init(&map->hn);
-		spin_unlock(&me->hlock);
 		if (map->refs > 0)
 			return;
 	} else {
@@ -1093,14 +1070,6 @@ static int fastrpc_mmap_create(struct fastrpc_file *fl, int fd,
 		trace_fastrpc_dma_map(fl->cid, fd, map->phys, map->size,
 			len, mflags, map->attach->dma_map_attrs);
 
-		VERIFY(err, map->size >= len && map->size < me->max_size_limit);
-		if (err) {
-			err = -EFAULT;
-			pr_err("adsprpc: %s: invalid map size 0x%zx len 0x%zx\n",
-				__func__, map->size, len);
-			goto bail;
-		}
-
 		vmid = fl->apps->channel[fl->cid].vmid;
 		if (!sess->smmu.enabled && !vmid) {
 			VERIFY(err, map->phys >= me->range.addr &&
@@ -1142,17 +1111,12 @@ static int fastrpc_buf_alloc(struct fastrpc_file *fl, size_t size,
 			int remote, struct fastrpc_buf **obuf)
 {
 	int err = 0, vmid;
-	struct fastrpc_apps *me = &gfa;
 	struct fastrpc_buf *buf = NULL, *fr = NULL;
 	struct hlist_node *n;
 
-	VERIFY(err, size > 0 && size < me->max_size_limit);
-	if (err) {
-		err = -EFAULT;
-		pr_err("adsprpc: %s: invalid allocation size 0x%zx\n",
-			__func__, size);
+	VERIFY(err, size > 0);
+	if (err)
 		goto bail;
-	}
 
 	if (!remote) {
 		/* find the smallest buffer that fits in the cache */
@@ -2077,16 +2041,8 @@ static int fastrpc_invoke_send(struct smq_invoke_ctx *ctx,
 {
 	struct smq_msg *msg = &ctx->msg;
 	struct fastrpc_file *fl = ctx->fl;
-	struct fastrpc_channel_ctx *channel_ctx = NULL;
-	int err = 0, cid = -1;
-
-	channel_ctx = &fl->apps->channel[fl->cid];
-	cid = fl->cid;
-	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
-	if (err) {
-		err = -ECHRNG;
-		goto bail;
-	}
+	struct fastrpc_channel_ctx *channel_ctx = &fl->apps->channel[fl->cid];
+	int err = 0;
 
 	mutex_lock(&channel_ctx->smd_mutex);
 	msg->pid = fl->tgid;
@@ -2276,23 +2232,10 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 {
 	struct smq_invoke_ctx *ctx = NULL;
 	struct fastrpc_ioctl_invoke *invoke = &inv->inv;
-	int err = 0, interrupted = 0, cid = -1;
+	int err = 0, interrupted = 0, cid = fl->cid;
 	struct timespec invoket = {0};
 	int64_t *perf_counter = NULL;
 
-	cid = fl->cid;
-	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS);
-	if (err) {
-		err = -ECHRNG;
-		goto bail;
-	}
-	VERIFY(err, fl->sctx != NULL);
-	if (err) {
-		pr_err("adsprpc: ERROR: %s: user application %s domain is not set\n",
-			__func__, current->comm);
-		err = -EBADR;
-		goto bail;
-	}
 	if (fl->profile) {
 		perf_counter = getperfcounter(fl, PERF_COUNT);
 		getnstimeofday(&invoket);
@@ -2308,6 +2251,15 @@ static int fastrpc_internal_invoke(struct fastrpc_file *fl, uint32_t mode,
 				__func__, current->comm, cid, invoke->handle);
 			goto bail;
 		}
+	}
+
+	VERIFY(err, cid >= ADSP_DOMAIN_ID && cid < NUM_CHANNELS &&
+		fl->sctx != NULL);
+	if (err) {
+		pr_err("adsprpc: ERROR: %s: kernel session not initialized yet for %s\n",
+			__func__, current->comm);
+		err = EBADR;
+		goto bail;
 	}
 
 	if (!kernel) {
@@ -3176,7 +3128,7 @@ static int fastrpc_internal_munmap(struct fastrpc_file *fl,
 		pr_err("adsprpc: ERROR: %s: user application %s trying to unmap without initialization\n",
 			 __func__, current->comm);
 		err = EBADR;
-		return err;
+		goto bail;
 	}
 	mutex_lock(&fl->internal_map_mutex);
 
@@ -3225,11 +3177,6 @@ bail:
 	return err;
 }
 
-/*
- *	fastrpc_internal_munmap_fd can only be used for buffers
- *	mapped with persist attributes. This can only be called
- *	once for any persist buffer
- */
 static int fastrpc_internal_munmap_fd(struct fastrpc_file *fl,
 				struct fastrpc_ioctl_munmap_fd *ud)
 {
@@ -3238,15 +3185,14 @@ static int fastrpc_internal_munmap_fd(struct fastrpc_file *fl,
 
 	VERIFY(err, (fl && ud));
 	if (err)
-		return err;
+		goto bail;
 	VERIFY(err, fl->dsp_proc_init == 1);
 	if (err) {
 		pr_err("adsprpc: ERROR: %s: user application %s trying to unmap without initialization\n",
 			__func__, current->comm);
 		err = EBADR;
-		return err;
+		goto bail;
 	}
-	mutex_lock(&fl->internal_map_mutex);
 	mutex_lock(&fl->map_mutex);
 	if (fastrpc_mmap_find(fl, ud->fd, ud->va, ud->len, 0, 0, &map)) {
 		pr_err("adsprpc: mapping not found to unmap fd 0x%x, va 0x%llx, len 0x%x\n",
@@ -3256,13 +3202,10 @@ static int fastrpc_internal_munmap_fd(struct fastrpc_file *fl,
 		mutex_unlock(&fl->map_mutex);
 		goto bail;
 	}
-	if (map && (map->attr & FASTRPC_ATTR_KEEP_MAP)) {
-		map->attr = map->attr & (~FASTRPC_ATTR_KEEP_MAP);
+	if (map)
 		fastrpc_mmap_free(map, 0);
-	}
 	mutex_unlock(&fl->map_mutex);
 bail:
-	mutex_unlock(&fl->internal_map_mutex);
 	return err;
 }
 
@@ -3281,7 +3224,7 @@ static int fastrpc_internal_mmap(struct fastrpc_file *fl,
 		pr_err("adsprpc: ERROR: %s: user application %s trying to map without initialization\n",
 			__func__, current->comm);
 		err = EBADR;
-		return err;
+		goto bail;
 	}
 	mutex_lock(&fl->internal_map_mutex);
 	if ((ud->flags == ADSP_MMAP_ADD_PAGES) ||
@@ -3881,7 +3824,7 @@ static const struct file_operations debugfs_fops = {
 static int fastrpc_channel_open(struct fastrpc_file *fl)
 {
 	struct fastrpc_apps *me = &gfa;
-	int cid = -1, err = 0;
+	int cid, err = 0;
 
 	VERIFY(err, fl && fl->sctx && fl->cid >= 0 && fl->cid < NUM_CHANNELS);
 	if (err) {
@@ -3958,6 +3901,14 @@ static int fastrpc_device_open(struct inode *inode, struct file *filp)
 
 	snprintf(strpid, PID_SIZE, "%d", current->pid);
 	buf_size = strlen(current->comm) + strlen("_") + strlen(strpid) + 1;
+	/* yanghao@PSW.Kernel.Stability kasan detect the buf_size < snprintf return size caused 
+	 * the out of bounds. here just alloc the UL_SIZE 2019-01-05
+	 */
+#ifdef VENDOR_EDIT
+	if (buf_size < UL_SIZE)
+		buf_size = UL_SIZE;
+#endif /*VENDOR_EDIT*/
+
 	VERIFY(err, NULL != (fl->debug_buf = kzalloc(buf_size, GFP_KERNEL)));
 	if (err) {
 		kfree(fl);
@@ -4590,11 +4541,9 @@ static int fastrpc_cb_probe(struct device *dev)
 	struct fastrpc_channel_ctx *chan;
 	struct fastrpc_session_ctx *sess;
 	struct of_phandle_args iommuspec;
-	struct fastrpc_apps *me = &gfa;
 	const char *name;
 	int err = 0, cid = -1, i = 0;
 	u32 sharedcb_count = 0, j = 0;
-	uint32_t dma_addr_pool[2] = {0, 0};
 
 	VERIFY(err, NULL != (name = of_get_property(dev->of_node,
 					 "label", NULL)));
@@ -4640,11 +4589,6 @@ static int fastrpc_cb_probe(struct device *dev)
 
 	dma_set_max_seg_size(sess->smmu.dev, DMA_BIT_MASK(32));
 	dma_set_seg_boundary(sess->smmu.dev, (unsigned long)DMA_BIT_MASK(64));
-
-	of_property_read_u32_array(dev->of_node, "qcom,iommu-dma-addr-pool",
-			dma_addr_pool, 2);
-	me->max_size_limit = (dma_addr_pool[1] == 0 ? 0x78000000 :
-			dma_addr_pool[1]);
 
 	if (of_get_property(dev->of_node, "shared-cb", NULL) != NULL) {
 		err = of_property_read_u32(dev->of_node, "shared-cb",
@@ -4784,6 +4728,7 @@ static int fastrpc_probe(struct platform_device *pdev)
 							&gcinfo[0].rhvm);
 		init_qos_cores_list(dev, "qcom,qos-cores",
 							&me->silvercores);
+
 
 		of_property_read_u32(dev->of_node, "qcom,rpc-latency-us",
 			&me->latency);
